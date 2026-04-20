@@ -1,131 +1,86 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <immintrin.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdbool.h>
+#include <stdalign.h>
 #include <pthread.h>
+#include <time.h>
 
-#define NUM_THREADS 8
-#define MAX_RECORDS_PER_THREAD 2000000 
-
-typedef struct {
-    uint64_t timestamp;
-    int64_t high;
-    int64_t low;
-} Record;
+#define RING_SIZE 1048576 // 1M slots for stress testing
+#define NUM_CONSUMERS 3
+#define TOTAL_RECORDS 100000000 // 100M records
 
 typedef struct {
-    const char* file_data;
-    size_t start;
-    size_t end;
-    Record* record_book;
-    uint64_t count; 
-} WorkerData;
+    uint64_t data[RING_SIZE];
+    alignas(64) _Atomic uint64_t tail;
+    alignas(64) _Atomic uint64_t heads[NUM_CONSUMERS];
+} axiom_queue_t;
 
-/**
- * FIXED-POINT PARSER: Handles decimals by scaling (Price * 100)
- * Example: "60542.12" becomes 6054212.
- */
-inline int64_t parse_fixed(const char* p, int len) {
-    int64_t val = 0;
-    int has_dot = 0;
-    int decimals = 0;
-    for (int i = 0; i < len; i++) {
-        if (p[i] == '.') { has_dot = 1; continue; }
-        val = val * 10 + (p[i] - '0');
-        if (has_dot) decimals++;
-        if (decimals == 2) break; // We only care about 2 decimal places
+// PRODUCER: V3.1 Multi-Head Sync
+void* producer(void* arg) {
+    axiom_queue_t *q = (axiom_queue_t*)arg;
+    for (uint64_t i = 0; i < TOTAL_RECORDS; i++) {
+        uint64_t current_tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
+        uint64_t next_tail = current_tail + 1;
+
+        // Stall until the slowest consumer clears space
+        bool full = true;
+        while (full) {
+            full = false;
+            for (int j = 0; j < NUM_CONSUMERS; j++) {
+                uint64_t c_head = atomic_load_explicit(&q->heads[j], memory_order_acquire);
+                if (next_tail - c_head >= RING_SIZE) {
+                    full = true;
+                    break;
+                }
+            }
+        }
+
+        q->data[current_tail % RING_SIZE] = i;
+        atomic_store_explicit(&q->tail, next_tail, memory_order_release);
     }
-    // Pad if there were fewer than 2 decimals (e.g., "60.5" -> 6050)
-    while (decimals < 2) { val *= 10; decimals++; }
-    return val;
+    return NULL;
 }
 
-void* axiom_worker(void* arg) {
-    WorkerData* wd = (WorkerData*)arg;
-    const char* data = wd->file_data;
-    size_t i = wd->start;
-    size_t sector_end = wd->end;
-
-    __m256i v_comma = _mm256_set1_epi8(',');
-    __m256i v_newline = _mm256_set1_epi8('\n');
-
-    int col_idx = 0;
-    const char* field_start = &data[i];
-
-    for (; i <= (sector_end - 32); i += 32) {
-        __m256i chunk = _mm256_loadu_si256((const __m256i*)(data + i));
-        uint32_t mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v_comma)) | 
-                        _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v_newline));
-
-        while (mask != 0) {
-            int bit_pos = __builtin_ctz(mask);
-            size_t abs_pos = i + bit_pos;
-            int len = (int)(abs_pos - (field_start - data));
-
-            // Adjust these col_idx based on your real CSV header!
-            if (col_idx == 0) wd->record_book[wd->count].timestamp = parse_fixed(field_start, len);
-            if (col_idx == 2) wd->record_book[wd->count].high = parse_fixed(field_start, len);
-            if (col_idx == 3) wd->record_book[wd->count].low = parse_fixed(field_start, len);
-
-            if (data[abs_pos] == '\n') { col_idx = 0; wd->count++; }
-            else col_idx++;
-
-            field_start = &data[abs_pos + 1];
-            mask &= (mask - 1);
+// CONSUMER: Independent Progress
+typedef struct { axiom_queue_t *q; int id; } thread_arg_t;
+void* consumer(void* arg) {
+    thread_arg_t *t = (thread_arg_t*)arg;
+    uint64_t local_head = 0;
+    while (local_head < TOTAL_RECORDS) {
+        uint64_t current_tail = atomic_load_explicit(&t->q->tail, memory_order_acquire);
+        while (local_head < current_tail) {
+            uint64_t val = t->q->data[local_head % RING_SIZE];
+            local_head++;
+            atomic_store_explicit(&t->q->heads[t->id], local_head, memory_order_release);
         }
     }
     return NULL;
 }
 
-int main(int argc, char** argv) {
-    if (argc < 2) return 1;
-    int fd = open(argv[1], O_RDONLY);
-    struct stat st; fstat(fd, &st);
-    char* data = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+int main() {
+    axiom_queue_t *q = calloc(1, sizeof(axiom_queue_t));
+    pthread_t prod_tid, cons_tid[NUM_CONSUMERS];
+    thread_arg_t args[NUM_CONSUMERS];
 
-    Record* storage = malloc(sizeof(Record) * NUM_THREADS * MAX_RECORDS_PER_THREAD);
-    pthread_t threads[NUM_THREADS];
-    WorkerData workers[NUM_THREADS];
-    size_t chunk = st.st_size / NUM_THREADS;
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
-    for (int i = 0; i < NUM_THREADS; i++) {
-        workers[i].file_data = data;
-        workers[i].count = 0;
-        workers[i].record_book = &storage[i * MAX_RECORDS_PER_THREAD];
-        size_t s = (i == 0) ? 0 : i * chunk;
-        if (i > 0) { while (s < st.st_size && data[s-1] != '\n') s++; }
-        workers[i].start = s;
-        size_t e = (i == NUM_THREADS - 1) ? st.st_size : (i + 1) * chunk;
-        if (i < NUM_THREADS - 1) { while (e < st.st_size && data[e-1] != '\n') e++; }
-        workers[i].end = e;
-        pthread_create(&threads[i], NULL, axiom_worker, &workers[i]);
+    pthread_create(&prod_tid, NULL, producer, q);
+    for (int i = 0; i < NUM_CONSUMERS; i++) {
+        args[i].q = q; args[i].id = i;
+        pthread_create(&cons_tid[i], NULL, consumer, &args[i]);
     }
 
-    uint64_t total = 0;
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pthread_join(threads[i], NULL);
-        total += workers[i].count;
-    }
+    pthread_join(prod_tid, NULL);
+    for (int i = 0; i < NUM_CONSUMERS; i++) pthread_join(cons_tid[i], NULL);
 
-    printf("[Hydra V5.0] Total Records: %lu\n", total);
-    
-    // --- SMC ANALYSIS PASS ---
-    uint64_t fvg_count = 0;
-    for (int t = 0; t < NUM_THREADS; t++) {
-        for (uint64_t r = 1; r < workers[t].count - 1; r++) {
-            if (workers[t].record_book[r+1].low > workers[t].record_book[r-1].high) {
-                fvg_count++;
-            }
-        }
-    }
-    printf("[SMC Result] Found %lu Fair Value Gaps in Real-World Time: 0.4s\n", fvg_count);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double time_taken = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) * 1e-9;
+    printf("Processed %lu records across %d consumers in %.2f seconds.\n", TOTAL_RECORDS, NUM_CONSUMERS, time_taken);
+    printf("Throughput: %.2f M records/sec\n", (TOTAL_RECORDS / time_taken) / 1e6);
 
-    free(storage);
-    munmap(data, st.st_size);
-    close(fd);
+    free(q);
     return 0;
 }
