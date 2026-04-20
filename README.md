@@ -1,6 +1,6 @@
 # Axiom Hydra V3.1: Hardware-Aligned Data Ingestion 🛡️🚀
 
-![Axiom Hydra V3.1 Benchmark](v3_1_benchmark.png.jpeg)
+*(Note: I replaced the spaces with `_`. This now matches the file `v3_1_benchmark.png.jpeg` shown in your left sidebar exactly.)*
 ### **The Enterprise Objective**
 High-volume data pipelines often fail due to the "Python/Java Object Tax." Axiom Hydra bypasses these abstractions using C11 atomics and mechanical sympathy to achieve near-theoretical throughput limits.
 
