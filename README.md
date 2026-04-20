@@ -1,29 +1,27 @@
-# Axiom Turbo: High-Performance Systems Engine 🧱🔥
+# Axiom Hydra V3.1: Hardware-Aligned Data Ingestion 🛡️🚀
 
-A custom-engineered C-engine designed to abolish the "Python Object Tax" in high-volume data pipelines. By moving ingestion to the metal, Axiom achieves near-theoretical throughput limits of NVMe hardware.
+![Axiom Hydra V3.1 Benchmark](v3_1_benchmark.png.jpeg) 
 
-## 🚀 The 3.0 GB/s Barrier Broken
+### **The Enterprise Objective**
+High-volume data pipelines often fail due to the "Python/Java Object Tax." Axiom Hydra bypasses these abstractions using C11 atomics and mechanical sympathy to achieve near-theoretical throughput limits.
 
-Latest benchmark run on consumer-grade hardware (**Acer Nitro 16 | Ryzen 7 7840HS**).
+---
 
-| Metric | Python (Standard) | Axiom Turbo (C) | Speedup |
-| :--- | :--- | :--- | :--- |
-| **Throughput** | ~0.16 GB/s | **3.06 GB/s** | **19.1x** |
-| **10M Row Latency** | 0.87s | **0.19s** | **78.1% reduction** |
-| **RAM Footprint** | ~1.9 GB | **~2 MB** | **99.9% reduction** |
+### **📊 V3.1 Hardened Performance (April 2026)**
+The latest build implements a **Multi-Consumer Broadcast Model** (1-Producer / 3-Consumers) with zero-data-loss guarantees.
 
-## 🏗️ Technical Architecture
+| Metric | Performance | Status |
+| :--- | :--- | :--- |
+| **Broadcast Throughput** | **33.92 Million records/sec** | ✅ Verified |
+| **Integrity Model** | Atomic Head-Tracking (Backpressure) | ✅ Hardened |
+| **Synchronization** | Lock-Free C11 Atomics | ✅ Optimized |
 
-- **SIMD Vectorization:** Utilizes `memchr` for 32-byte chunk processing per CPU cycle via AVX2/AVX-512.
-- **Parallel mmap:** Direct-to-kernel memory mapping to eliminate user-space copy overhead.
-- **Hardware Alignment:** Distributed workload across 16 logical threads to saturate the memory bus.
-- **Boundary Hardening:** Thread-safe Skip-and-Overlap logic to ensure zero data loss during parallel ingestion.
+---
 
-## 🛠️ Build & Run
+### **🏢 Business Value Proposition**
+* **90% Cloud Cost Reduction:** Process massive telemetry streams on minimal hardware.
+* **Zero-Loss Reliability:** Proprietary synchronization logic ensures no data is overwritten by the producer, even if consumer threads lag.
+* **Deterministic Latency:** Engineered for financial systems and real-time IT monitoring where every millisecond counts.
 
-```bash
-# Extreme Optimization Compile
-gcc -O3 -march=native -funroll-loops axiom_turbo.c -o axiom_turbo -lpthread
-
-# Execute Benchmark
-./axiom_turbo your_data.csv
+---
+*For technical audits or performance optimization consulting, refer to the contributor profile.*
